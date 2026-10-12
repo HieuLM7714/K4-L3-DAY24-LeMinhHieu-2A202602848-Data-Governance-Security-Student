@@ -30,10 +30,42 @@ set ở tests/vn_pii_testset.jsonl):
 """
 from __future__ import annotations
 
+import re
+
+# STK phải đi kèm từ khoá: một STK 12 số trông y hệt CCCD, chỉ ngữ cảnh mới
+# phân biệt được. Group "value" là phần số cần redact.
+_BANK_RE = re.compile(
+    r"(?:\bSTK|s[ốo] t[àa]i kho[ảa]n|\bt[àa]i kho[ảa]n|\baccount)\s*(?:s[ốo]\s*)?[:#]?\s*"
+    r"(?P<value>(?<!\d)\d{8,16}(?!\d))",
+    re.IGNORECASE,
+)
+_CCCD_RE = re.compile(r"(?<!\d)(?P<value>\d{12})(?!\d)")
+# 0xxxxxxxxx hoặc +84xxxxxxxxx, cho phép dấu cách/chấm/gạch giữa các số.
+_PHONE_RE = re.compile(r"(?<![\d+])(?P<value>(?:\+84|0)(?:[ .-]?\d){9})(?![\d])")
+_EMAIL_RE = re.compile(r"(?P<value>[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
+
+# Thứ tự = độ ưu tiên khi hai pattern chồng lên cùng một đoạn số.
+_RECOGNIZERS = (
+    ("EMAIL", _EMAIL_RE),
+    ("VN_BANK_ACCOUNT", _BANK_RE),
+    ("VN_CCCD", _CCCD_RE),
+    ("VN_PHONE", _PHONE_RE),
+)
+
 
 def detect(text: str) -> list[dict]:
-    raise NotImplementedError("BƯỚC 3a: implement PII detection")
+    entities: list[dict] = []
+    for entity_type, pattern in _RECOGNIZERS:
+        for match in pattern.finditer(text):
+            start, end = match.span("value")
+            if any(start < e["end"] and e["start"] < end for e in entities):
+                continue
+            entities.append({"type": entity_type, "start": start, "end": end})
+    return sorted(entities, key=lambda e: e["start"])
 
 
 def redact(text: str) -> str:
-    raise NotImplementedError("BƯỚC 3a: implement PII redaction")
+    # Thay từ cuối về đầu để offset của entity phía trước không bị lệch.
+    for entity in sorted(detect(text), key=lambda e: e["start"], reverse=True):
+        text = text[: entity["start"]] + f"[REDACTED_{entity['type']}]" + text[entity["end"]:]
+    return text

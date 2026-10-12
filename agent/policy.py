@@ -34,7 +34,13 @@ không phải xác thực người dùng production.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+PRINCIPALS_FILE = Path(__file__).resolve().parent.parent / "data" / "principals.json"
+CLASSIFICATIONS = ("public", "internal", "restricted")
 
 
 @dataclass(frozen=True)
@@ -51,5 +57,57 @@ class PolicyContext:
     expires_at: str = ""
 
 
+def load_principals(path: Path | None = None) -> dict:
+    """Nguồn tin cậy mô phỏng: chỉ tra principal trong data/principals.json."""
+    return json.loads((path or PRINCIPALS_FILE).read_text(encoding="utf-8"))
+
+
+def _parse_expiry(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    """Deny-by-default: chỉ allow khi qua hết các rule, mọi nhánh đều có reason."""
+    tool = context.requested_tool or "<unspecified tool>"
+
+    if context.data_classification not in CLASSIFICATIONS:
+        return False, f"deny {tool}: unknown data classification {context.data_classification!r}"
+
+    # Rule tối thiểu, đặt TRƯỚC OBO: không quyền nào của principal mở được nó.
+    if context.data_classification == "restricted" and context.egress_enabled:
+        return False, (f"deny {tool}: restricted data with egress enabled "
+                       f"(on behalf of {context.principal_id or '<none>'})")
+
+    principal = load_principals().get(context.principal_id)
+    if principal is None:
+        return False, f"deny {tool}: unknown principal {context.principal_id!r}"
+
+    expires_at = _parse_expiry(context.expires_at)
+    if expires_at is None:
+        return False, f"deny {tool}: missing or invalid expires_at {context.expires_at!r}"
+    if expires_at <= datetime.now(timezone.utc):
+        return False, f"deny {tool}: delegation expired at {context.expires_at}"
+
+    if context.request_purpose not in principal.get("purposes", []):
+        return False, (f"deny {tool}: purpose {context.request_purpose!r} not allowed "
+                       f"for principal {context.principal_id}")
+
+    if context.delegation_depth < 0:
+        return False, f"deny {tool}: invalid delegation_depth {context.delegation_depth}"
+
+    effective = set(principal.get("allowed_tools", [])) & set(context.agent_scopes)
+    if context.delegation_depth > 0:
+        effective &= set(context.parent_scopes)
+    if context.requested_tool not in effective:
+        return False, (f"deny {tool}: not in effective scope {sorted(effective)} "
+                       f"(principal {context.principal_id} ∩ agent_scopes"
+                       f"{' ∩ parent_scopes' if context.delegation_depth > 0 else ''})")
+
+    return True, (f"allow {tool}: principal {context.principal_id}, purpose "
+                  f"{context.request_purpose}, classification {context.data_classification}, "
+                  f"egress={'on' if context.egress_enabled else 'off'}, "
+                  f"depth={context.delegation_depth}")
