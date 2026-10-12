@@ -1,0 +1,10 @@
+# Secret scanning trước mỗi commit. Dùng binary Gitleaks đã cài sẵn trong PATH
+# (gitleaks-system), pin đúng phiên bản của lab, không build Go trong giờ học.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks-system
+        # `gitleaks git` chỉ nhận một repo path, không nhận danh sách file.
+        pass_filenames: false
+        args: ["--config", ".gitleaks.toml"]
